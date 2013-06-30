@@ -1,0 +1,224 @@
+commit c59950e58d3c5bf676a0fcf68fa94c7642f52101
+Author: Alexandre Kandalintsev <spam@messir.net>
+Date:   Sun Mar 24 14:08:42 2013 +0100
+
+    added support for ifname in -netdev bridge
+
+diff --git a/include/net/net.h b/include/net/net.h
+index cb049a1..4b25eb5 100644
+--- a/include/net/net.h
++++ b/include/net/net.h
+@@ -172,6 +172,7 @@ NetClientState *net_hub_port_find(int hub_id);
+ #define DEFAULT_NETWORK_DOWN_SCRIPT "/etc/qemu-ifdown"
+ #define DEFAULT_BRIDGE_HELPER CONFIG_QEMU_HELPERDIR "/qemu-bridge-helper"
+ #define DEFAULT_BRIDGE_INTERFACE "br0"
++#define DEFAULT_BRIDGE_IFNAME "tap%d"
+ 
+ void qdev_set_nic_properties(DeviceState *dev, NICInfo *nd);
+ 
+diff --git a/net/tap.c b/net/tap.c
+index ce79699..d1d5b6a 100644
+--- a/net/tap.c
++++ b/net/tap.c
+@@ -424,11 +424,11 @@ static int recv_fd(int c)
+     return len;
+ }
+ 
+-static int net_bridge_run_helper(const char *helper, const char *bridge)
++static int net_bridge_run_helper(const char *helper, const char *bridge, const char *ifname)
+ {
+     sigset_t oldmask, mask;
+     int pid, status;
+-    char *args[5];
++    char *args[6];
+     char **parg;
+     int sv[2];
+ 
+@@ -446,6 +446,7 @@ static int net_bridge_run_helper(const char *helper, const char *bridge)
+         int open_max = sysconf(_SC_OPEN_MAX), i;
+         char fd_buf[6+10];
+         char br_buf[6+IFNAMSIZ] = {0};
++        char ifname_buf[9+IFNAMSIZ] = {0};
+         char helper_cmd[PATH_MAX + sizeof(fd_buf) + sizeof(br_buf) + 15];
+ 
+         for (i = 0; i < open_max; i++) {
+@@ -459,6 +460,10 @@ static int net_bridge_run_helper(const char *helper, const char *bridge)
+ 
+         snprintf(fd_buf, sizeof(fd_buf), "%s%d", "--fd=", sv[1]);
+ 
++        if (ifname) {
++          snprintf(ifname_buf, sizeof(ifname_buf), "%s%s", "--ifname=", ifname);
++        }
++
+         if (strrchr(helper, ' ') || strrchr(helper, '\t')) {
+             /* assume helper is a command */
+ 
+@@ -466,8 +471,8 @@ static int net_bridge_run_helper(const char *helper, const char *bridge)
+                 snprintf(br_buf, sizeof(br_buf), "%s%s", "--br=", bridge);
+             }
+ 
+-            snprintf(helper_cmd, sizeof(helper_cmd), "%s %s %s %s",
+-                     helper, "--use-vnet", fd_buf, br_buf);
++            snprintf(helper_cmd, sizeof(helper_cmd), "%s %s %s %s %s",
++                     helper, "--use-vnet", fd_buf, br_buf, ifname_buf);
+ 
+             parg = args;
+             *parg++ = (char *)"sh";
+@@ -486,6 +491,7 @@ static int net_bridge_run_helper(const char *helper, const char *bridge)
+             *parg++ = (char *)"--use-vnet";
+             *parg++ = fd_buf;
+             *parg++ = br_buf;
++            *parg++ = ifname_buf;
+             *parg++ = NULL;
+ 
+             execv(helper, args);
+@@ -524,7 +530,7 @@ int net_init_bridge(const NetClientOptions *opts, const char *name,
+                     NetClientState *peer)
+ {
+     const NetdevBridgeOptions *bridge;
+-    const char *helper, *br;
++    const char *helper, *br, *ifname;
+ 
+     TAPState *s;
+     int fd, vnet_hdr;
+@@ -534,8 +540,9 @@ int net_init_bridge(const NetClientOptions *opts, const char *name,
+ 
+     helper = bridge->has_helper ? bridge->helper : DEFAULT_BRIDGE_HELPER;
+     br     = bridge->has_br     ? bridge->br     : DEFAULT_BRIDGE_INTERFACE;
++    ifname = bridge->has_ifname ? bridge->ifname : DEFAULT_BRIDGE_IFNAME;
+ 
+-    fd = net_bridge_run_helper(helper, br);
++    fd = net_bridge_run_helper(helper, br, ifname);
+     if (fd == -1) {
+         return -1;
+     }
+@@ -686,11 +693,12 @@ int net_init_tap(const NetClientOptions *opts, const char *name,
+     const char *script = NULL; /* suppress wrong "uninit'd use" gcc warning */
+     const char *downscript = NULL;
+     const char *vhostfdname;
++    const char *br;
+     char ifname[128];
+ 
+     assert(opts->kind == NET_CLIENT_OPTIONS_KIND_TAP);
+     tap = opts->tap;
+-    queues = tap->has_queues ? tap->queues : 1;
++    queues      = tap->has_queues  ? tap->queues  : 1;
+     vhostfdname = tap->has_vhostfd ? tap->vhostfd : NULL;
+ 
+     /* QEMU vlans does not support multiqueue tap, in this case peer is set.
+@@ -775,8 +783,7 @@ int net_init_tap(const NetClientOptions *opts, const char *name,
+                          "queues=, and fds= are invalid with helper=");
+             return -1;
+         }
+-
+-        fd = net_bridge_run_helper(tap->helper, DEFAULT_BRIDGE_INTERFACE);
++        fd = net_bridge_run_helper(tap->helper, DEFAULT_BRIDGE_INTERFACE, NULL);
+         if (fd == -1) {
+             return -1;
+         }
+diff --git a/qapi-schema.json b/qapi-schema.json
+index 088f4e1..be2373a 100644
+--- a/qapi-schema.json
++++ b/qapi-schema.json
+@@ -2676,6 +2676,7 @@
+ { 'type': 'NetdevBridgeOptions',
+   'data': {
+     '*br':     'str',
++    '*ifname': 'str',
+     '*helper': 'str' } }
+ 
+ ##
+diff --git a/qemu-bridge-helper.c b/qemu-bridge-helper.c
+index 287bfd5..39486b1 100644
+--- a/qemu-bridge-helper.c
++++ b/qemu-bridge-helper.c
+@@ -67,7 +67,7 @@ typedef QSIMPLEQ_HEAD(ACLList, ACLRule) ACLList;
+ static void usage(void)
+ {
+     fprintf(stderr,
+-            "Usage: qemu-bridge-helper [--use-vnet] --br=bridge --fd=unixfd\n");
++            "Usage: qemu-bridge-helper [--use-vnet] [--ifname=name] --br=bridge --fd=unixfd\n");
+ }
+ 
+ static int parse_acl_file(const char *filename, ACLList *acl_list)
+@@ -233,6 +233,7 @@ int main(int argc, char **argv)
+     int use_vnet = 0;
+     int mtu;
+     const char *bridge = NULL;
++    const char *ifname = NULL;
+     char iface[IFNAMSIZ];
+     int index;
+     ACLRule *acl_rule;
+@@ -259,6 +260,8 @@ int main(int argc, char **argv)
+             bridge = &argv[index][5];
+         } else if (strncmp(argv[index], "--fd=", 5) == 0) {
+             unixfd = atoi(&argv[index][5]);
++        } else if (strncmp(argv[index], "--ifname=", 9) == 0) {
++            ifname = &argv[index][9];
+         } else {
+             usage();
+             return EXIT_FAILURE;
+@@ -330,7 +333,12 @@ int main(int argc, char **argv)
+ 
+     /* request a tap device, disable PI, and add vnet header support if
+      * requested and it's available. */
+-    prep_ifreq(&ifr, "tap%d");
++    if (ifname) {
++      /* prep_ifreq will truncate the name if it is too long */
++      prep_ifreq(&ifr, ifname);
++    } else {
++      prep_ifreq(&ifr, "tap%d");
++    }
+     ifr.ifr_flags = IFF_TAP|IFF_NO_PI;
+     if (use_vnet && has_vnet_hdr(fd)) {
+         ifr.ifr_flags |= IFF_VNET_HDR;
+diff --git a/qemu-options.hx b/qemu-options.hx
+index d7afeab..dd49c6c 100644
+--- a/qemu-options.hx
++++ b/qemu-options.hx
+@@ -1379,7 +1379,7 @@ DEF("net", HAS_ARG, QEMU_OPTION_net,
+     "                use vhostforce=on to force vhost on for non-MSIX virtio guests\n"
+     "                use 'vhostfd=h' to connect to an already opened vhost net device\n"
+     "                use 'vhostfds=x:y:...:z to connect to multiple already opened vhost net devices\n"
+-    "-net bridge[,vlan=n][,name=str][,br=bridge][,helper=helper]\n"
++    "-net bridge[,vlan=n][,name=str][,br=bridge][,helper=helper][,ifname=ifname]\n"
+     "                connects a host TAP network interface to a host bridge device 'br'\n"
+     "                (default=" DEFAULT_BRIDGE_INTERFACE ") using the program 'helper'\n"
+     "                (default=" DEFAULT_BRIDGE_HELPER ")\n"
+@@ -1621,7 +1621,7 @@ qemu-system-i386 linux.img \
+                  -net nic -net tap,"helper=/usr/local/libexec/qemu-bridge-helper"
+ @end example
+ 
+-@item -netdev bridge,id=@var{id}[,br=@var{bridge}][,helper=@var{helper}]
++@item -netdev bridge,id=@var{id}[,br=@var{bridge}][,helper=@var{helper}][,ifname=@var{ifname}]
+ @item -net bridge[,vlan=@var{n}][,name=@var{name}][,br=@var{bridge}][,helper=@var{helper}]
+ Connect a host TAP network interface to a host bridge device.
+ 
+@@ -1630,6 +1630,10 @@ attach it to the bridge. The default network helper executable is
+ @file{/usr/local/libexec/qemu-bridge-helper} and the default bridge
+ device is @file{br0}.
+ 
++The name of the host tap interface can be changed by @var{ifname} parameter.
++The default value is @file{tapX} where X is a number. The parameter --ifname
++will be passed to the helper if this option is used.
++
+ Examples:
+ 
+ @example
+@@ -1644,6 +1648,16 @@ qemu-system-i386 linux.img -net bridge -net nic,model=virtio
+ qemu-system-i386 linux.img -net bridge,br=qemubr0 -net nic,model=virtio
+ @end example
+ 
++@example
++# Create two virtual interfaces, put them into different bridges
++# and give interfaces meaningful names.
++# PS intbr and extbr should be allowed in /etc/qemu/bridge.conf
++qemu-system-x86_64 --enable-kvm -m 512 -name virt \
++-device e1000,mac=52:54:DB:22:F9:7D,netdev=extbr -netdev bridge,id=extbr,br=extbr,ifname=virt_ext \
++-device e1000,mac=52:54:AC:8C:B6:6D,netdev=intbr -netdev bridge,id=intbr,br=intbr,ifname=virt_int \
++-drive file=/home/virtuals/virt.raw,if=virtio
++@end example
++
+ @item -netdev socket,id=@var{id}[,fd=@var{h}][,listen=[@var{host}]:@var{port}][,connect=@var{host}:@var{port}]
+ @item -net socket[,vlan=@var{n}][,name=@var{name}][,fd=@var{h}] [,listen=[@var{host}]:@var{port}][,connect=@var{host}:@var{port}]
+ 

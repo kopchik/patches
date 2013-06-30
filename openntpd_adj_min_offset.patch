@@ -1,0 +1,49 @@
+diff --git a/ntpd.c b/ntpd.c
+index 66b236e..6b95bcd 100644
+--- a/ntpd.c
++++ b/ntpd.c
+@@ -45,6 +45,7 @@ int		check_child(pid_t, const char *);
+ int		dispatch_imsg(struct ntpd_conf *);
+ int		ntpd_adjtime(double);
+ void		ntpd_settime(double);
++long int SETTIME_MIN_OFFSET = 180;
+ 
+ volatile sig_atomic_t	 quit = 0;
+ volatile sig_atomic_t	 reconfig = 0;
+@@ -100,7 +101,7 @@ main(int argc, char *argv[])
+ 	log_init(1);		/* log to stderr until daemonized */
+ 	res_init();		/* XXX */
+ 
+-	while ((ch = getopt(argc, argv, "df:sS")) != -1) {
++	while ((ch = getopt(argc, argv, "df:o:sS")) != -1) {
+ 		switch (ch) {
+ 		case 'd':
+ 			conf.debug = 1;
+@@ -108,6 +109,15 @@ main(int argc, char *argv[])
+ 		case 'f':
+ 			conffile = optarg;
+ 			break;
++        case 'o':
++            errno = 0;
++            SETTIME_MIN_OFFSET = strtol(optarg, NULL, 10);
++            if (errno) {
++                fprintf(stderr, "ntpd: cannot min offset (-o)\n");
++                exit(1);
++            }
++			conf.settime = 1;
++            break;
+ 		case 's':
+ 			conf.settime = 1;
+ 			break;
+diff --git a/ntpd.h b/ntpd.h
+index e501ce0..9833daf 100644
+--- a/ntpd.h
++++ b/ntpd.h
+@@ -56,7 +56,6 @@
+ 
+ #define	QUERYTIME_MAX		15	/* single query might take n secs max */
+ #define	OFFSET_ARRAY_SIZE	8
+-#define	SETTIME_MIN_OFFSET	180	/* min offset for settime at start */
+ #define	SETTIME_TIMEOUT		15	/* max seconds to wait with -s */
+ #define	LOG_NEGLIGEE		128	/* negligible drift to not log (ms) */
+ 
