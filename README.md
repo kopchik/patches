@@ -16,3 +16,10 @@ openntpd_adj_min_offset.patch
 
 Adds switch -o <min_adj> to openntpd that changes minimum offset
 that will be immidiately compensated on startup (implies -s).
+
+
+lprof-3.13.patch
+----------------
+
+Port of http://castl.cs.columbia.edu/limit/ for recent (3.13) kernels.
+
